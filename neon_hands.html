@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cyberpunk Hand Mesh - Smart Toggle Edition</title>
+    <style>
+        body {
+            margin: 0;
+            background: #050505;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+        .container {
+            position: relative;
+            width: 900px;
+            height: 675px;
+            max-width: 95vw;
+            max-height: 85vh;
+        }
+        #webcam {
+            display: none;
+        }
+        #output_canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border-radius: 16px;
+            box-shadow: 0 0 40px rgba(0, 255, 255, 0.15);
+            transform: scaleX(-1);
+            border: 2px solid #1a1a1a;
+        }
+        #status_ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            font-family: monospace;
+            font-size: 16px;
+            font-weight: bold;
+            padding: 12px 20px;
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.85);
+            border: 1px solid #333;
+            color: #fff;
+            line-height: 1.5;
+        }
+        #loading {
+            position: absolute;
+            color: #00ffff;
+            font-size: 22px;
+            font-weight: bold;
+            text-shadow: 0 0 12px #00ffff;
+            z-index: 10;
+            background: rgba(0,0,0,0.9);
+            padding: 20px 30px;
+            border-radius: 12px;
+            border: 2px solid #00ffff;
+            text-align: center;
+        }
+    </style>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="loading">INITIALIZING CYBER SYSTEM...<br><span style="font-size:13px; color:#888;">Double Fist to Toggle Skeleton</span></div>
+    
+    <div id="status_ui">
+        SYSTEM: READY<br>
+        <span style="font-size: 11px; color: #ff00ff;">🎵 CLICK ANYWHERE TO UNMUTE</span>
+    </div>
+
+    <div class="container">
+        <video id="webcam" autoplay playsinline></video>
+        <canvas id="output_canvas" width="640" height="480"></canvas>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const loadingElement = document.getElementById('loading');
+        const statusUi = document.getElementById('status_ui');
+
+        // Toggle States
+        let bridgeActive = false; 
+        let insideTouchZone = false; 
+        let showSkeleton = true; // Added toggle state
+        let isSkeletonToggling = false; // Debounce flag
+
+        let particles = [];
+        const colorPalette = ['#00ffff', '#ff00ff', '#00ff00', '#ff3300', '#ffff00', '#ffffff'];
+        let hand1ColorIdx = 0;
+        let hand2ColorIdx = 1;
+        let hand1FistClosed = false;
+        let hand2FistClosed = false;
+
+        let audioCtx = null;
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                statusUi.innerHTML = "SYSTEM: ONLINE<br><span style='color:#00ffff;'>🔊 AUDIO ENGINE ACTIVE</span>";
+            }
+        }
+        document.body.addEventListener('click', initAudio);
+
+        function playPowerUpSound() {
+            if (!audioCtx) return;
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            let now = audioCtx.currentTime;
+            let osc = audioCtx.createOscillator();
+            let gain = audioCtx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(150, now);
+            osc.frequency.exponentialRampToValueAtTime(1100, now + 0.35);
+            gain.gain.setValueAtTime(0.2, now);
+            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.35);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start(now);
+            osc.stop(now + 0.35);
+        }
+
+        function playPowerDownSound() {
+            if (!audioCtx) return;
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            let now = audioCtx.currentTime;
+            let osc = audioCtx.createOscillator();
+            let gain = audioCtx.createGain();
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(700, now);
+            osc.frequency.linearRampToValueAtTime(80, now + 0.25);
+            gain.gain.setValueAtTime(0.15, now);
+            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start(now);
+            osc.stop(now + 0.25);
+        }
+
+        class SparkParticle {
+            constructor(x, y, color) {
+                this.x = x; this.y = y; this.color = color;
+                this.size = Math.random() * 4 + 2; 
+                this.speedX = (Math.random() - 0.5) * 8;
+                this.speedY = (Math.random() - 0.5) * 8 - 1.5; 
+                this.alpha = 1; this.decay = Math.random() * 0.04 + 0.02; 
+            }
+            update() {
+                this.x += this.speedX; this.y += this.speedY;
+                this.alpha -= this.decay; if (this.size > 0.5) this.size -= 0.1;
+            }
+            draw() {
+                if (this.alpha <= 0) return;
+                canvasCtx.save();
+                canvasCtx.globalAlpha = this.alpha;
+                canvasCtx.shadowBlur = 15; canvasCtx.shadowColor = this.color;
+                canvasCtx.beginPath();
+                canvasCtx.strokeStyle = this.color; canvasCtx.lineWidth = 1.5;
+                canvasCtx.moveTo(this.x - this.size, this.y); canvasCtx.lineTo(this.x + this.size, this.y);
+                canvasCtx.moveTo(this.x, this.y - this.size); canvasCtx.lineTo(this.x, this.y + this.size);
+                canvasCtx.stroke();
+                canvasCtx.beginPath();
+                canvasCtx.fillStyle = '#ffffff';
+                canvasCtx.moveTo(this.x, this.y - this.size/2); canvasCtx.lineTo(this.x + this.size/2, this.y);
+                canvasCtx.lineTo(this.x, this.y + this.size/2); canvasCtx.lineTo(this.x - this.size/2, this.y);
+                canvasCtx.fill();
+                canvasCtx.restore();
+            }
+        }
+
+        function isFistClenched(landmarks) {
+            const tips = [8, 12, 16, 20];
+            const mcps = [5, 9, 13, 17];
+            let closedFingers = 0;
+            for (let i = 0; i < 4; i++) {
+                const distTipWrist = Math.hypot(landmarks[tips[i]].x - landmarks[0].x, landmarks[tips[i]].y - landmarks[0].y);
+                const distMcpWrist = Math.hypot(landmarks[mcps[i]].x - landmarks[0].x, landmarks[mcps[i]].y - landmarks[0].y);
+                if (distTipWrist < distMcpWrist) closedFingers++;
+            }
+            return closedFingers >= 3; 
+        }
+
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.65,
+            minTrackingConfidence: 0.65
+        });
+
+        hands.onResults(onResults);
+
+        function drawNeonLine(pt1, pt2, color, thickness = 3, glow = 12) {
+            canvasCtx.beginPath();
+            canvasCtx.moveTo(pt1.x * canvasElement.width, pt1.y * canvasElement.height);
+            canvasCtx.lineTo(pt2.x * canvasElement.width, pt2.y * canvasElement.height);
+            canvasCtx.strokeStyle = color;
+            canvasCtx.lineWidth = thickness;
+            canvasCtx.shadowBlur = glow;
+            canvasCtx.shadowColor = color;
+            canvasCtx.stroke();
+        }
+
+        function onResults(results) {
+            if (loadingElement.style.display !== 'none') loadingElement.style.display = 'none';
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.shadowBlur = 0;
+
+            let isHand1Clenched = false;
+            let isHand2Clenched = false;
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                results.multiHandLandmarks.forEach((landmarks, idx) => {
+                    const clenched = isFistClenched(landmarks);
+                    if (idx === 0) {
+                        isHand1Clenched = clenched;
+                        if (clenched && !hand1FistClosed) {
+                            hand1ColorIdx = (hand1ColorIdx + 1) % colorPalette.length;
+                            if (hand1ColorIdx === hand2ColorIdx) hand1ColorIdx = (hand1ColorIdx + 1) % colorPalette.length;
+                            hand1FistClosed = true;
+                            for(let k=0; k<15; k++) particles.push(new SparkParticle(landmarks[0].x * canvasElement.width, landmarks[0].y * canvasElement.height, colorPalette[hand1ColorIdx]));
+                        } else if (!clenched) hand1FistClosed = false;
+                    } else if (idx === 1) {
+                        isHand2Clenched = clenched;
+                        if (clenched && !hand2FistClosed) {
+                            hand2ColorIdx = (hand2ColorIdx + 1) % colorPalette.length;
+                            if (hand2ColorIdx === hand1ColorIdx) hand2ColorIdx = (hand2ColorIdx + 1) % colorPalette.length;
+                            hand2FistClosed = true;
+                            for(let k=0; k<15; k++) particles.push(new SparkParticle(landmarks[0].x * canvasElement.width, landmarks[0].y * canvasElement.height, colorPalette[hand2ColorIdx]));
+                        } else if (!clenched) hand2FistClosed = false;
+                    }
+                });
+
+                // --- NEW LOGIC: Toggle Skeleton ---
+                if (isHand1Clenched && isHand2Clenched) {
+                    if (!isSkeletonToggling) {
+                        showSkeleton = !showSkeleton;
+                        isSkeletonToggling = true;
+                    }
+                } else {
+                    isSkeletonToggling = false;
+                }
+
+                // DRAW SKELETON ONLY IF TOGGLED ON
+                if (showSkeleton) {
+                    results.multiHandLandmarks.forEach((landmarks, idx) => {
+                        const handColor = (idx === 0) ? colorPalette[hand1ColorIdx] : colorPalette[hand2ColorIdx];
+                        const connections = [[0,1], [1,2], [2,3], [3,4], [0,5], [5,6], [6,7], [7,8], [5,9], [9,10], [10,11], [11,12], [9,13], [13,14], [14,15], [15,16], [13,17], [0,17], [17,18], [18,19], [19,20]];
+                        connections.forEach(([i, j]) => drawNeonLine(landmarks[i], landmarks[j], handColor, 2, 6));
+                        [4, 8, 12, 16, 20].forEach(tip => {
+                            if (Math.random() < 0.2) particles.push(new SparkParticle(landmarks[tip].x * canvasElement.width, landmarks[tip].y * canvasElement.height, handColor));
+                        });
+                        landmarks.forEach(lm => {
+                            canvasCtx.beginPath();
+                            canvasCtx.arc(lm.x * canvasElement.width, lm.y * canvasElement.height, 3, 0, 2 * Math.PI);
+                            canvasCtx.fillStyle = '#ffffff';
+                            canvasCtx.fill();
+                        });
+                    });
+                }
+
+                if (results.multiHandLandmarks.length >= 2) {
+                    const hand1 = results.multiHandLandmarks[0];
+                    const hand2 = results.multiHandLandmarks[1];
+                    const distance = Math.hypot(hand1[8].x - hand2[8].x, hand1[8].y - hand2[8].y);
+
+                    if (distance < 0.05) {
+                        if (!insideTouchZone) { bridgeActive = !bridgeActive; insideTouchZone = true; if (bridgeActive) playPowerUpSound(); else playPowerDownSound(); }
+                    } else if (distance > 0.09) insideTouchZone = false;
+
+                    if (bridgeActive) {
+                        let audioStatus = audioCtx ? "🔊 AUDIO ONLINE" : "🔇 CLICK TO UNMUTE";
+                        if (isHand1Clenched || isHand2Clenched) {
+                            statusUi.innerHTML = `BRIDGE: <span style='color:#ffff00;'>PAUSED</span><br>${audioStatus}`;
+                            statusUi.style.borderColor = "#ffff00";
+                        } else {
+                            statusUi.innerHTML = `BRIDGE: <span style='color:#00ff00;'>CONNECTED</span><br>${audioStatus}`;
+                            statusUi.style.borderColor = "#00ff00";
+                            [4, 8, 12, 16, 20].forEach(tipIndex => {
+                                const pX1 = hand1[tipIndex].x * canvasElement.width;
+                                const pY1 = hand1[tipIndex].y * canvasElement.height;
+                                const pX2 = hand2[tipIndex].x * canvasElement.width;
+                                const pY2 = hand2[tipIndex].y * canvasElement.height;
+                                let dynamicGrad = canvasCtx.createLinearGradient(pX1, pY1, pX2, pY2);
+                                dynamicGrad.addColorStop(0, colorPalette[hand1ColorIdx]);
+                                dynamicGrad.addColorStop(1, colorPalette[hand2ColorIdx]);
+                                canvasCtx.beginPath();
+                                canvasCtx.moveTo(pX1, pY1); canvasCtx.lineTo(pX2, pY2);
+                                canvasCtx.strokeStyle = dynamicGrad;
+                                canvasCtx.lineWidth = 2; canvasCtx.shadowBlur = 14; canvasCtx.shadowColor = colorPalette[hand1ColorIdx];
+                                canvasCtx.stroke();
+                                if (Math.random() < 0.4) {
+                                    particles.push(new SparkParticle(pX1, pY1, colorPalette[hand1ColorIdx]));
+                                    particles.push(new SparkParticle(pX2, pY2, colorPalette[hand2ColorIdx]));
+                                }
+                            });
+                        }
+                    } else {
+                        statusUi.innerHTML = `BRIDGE: <span style='color:#ff3333;'>OFF</span>`;
+                        statusUi.style.borderColor = "#ff3333";
+                    }
+                }
+            } else {
+                statusUi.innerHTML = "SYSTEM: NO HANDS DETECTED";
+                statusUi.style.borderColor = "#333";
+            }
+
+            for (let i = particles.length - 1; i >= 0; i--) {
+                particles[i].update();
+                if (particles[i].alpha <= 0) particles.splice(i, 1);
+                else particles[i].draw();
+            }
+            canvasCtx.restore();
+        }
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 640, height: 480
+        });
+        camera.start();
+    </script>
+</body>
+</html>
